@@ -41,6 +41,9 @@ export const accountsApi = {
   getRegisterCurrent: () =>
     apiClient.get<never, RegisterTask | { status: string }>('/admin/register/current'),
 
+  cancelRegisterTask: (taskId: string, reason?: string) =>
+    apiClient.post<{ reason?: string }, RegisterTask>(`/admin/register/cancel/${taskId}`, reason ? { reason } : {}),
+
   startLogin: (accountIds: string[]) =>
     apiClient.post<never, LoginTask>('/admin/login/start', accountIds),
 
@@ -50,6 +53,9 @@ export const accountsApi = {
   getLoginCurrent: () =>
     apiClient.get<never, LoginTask | { status: string }>('/admin/login/current'),
 
+  cancelLoginTask: (taskId: string, reason?: string) =>
+    apiClient.post<{ reason?: string }, LoginTask>(`/admin/login/cancel/${taskId}`, reason ? { reason } : {}),
+
   checkLogin: () =>
-    apiClient.post('/admin/login/check'),
+    apiClient.post<never, LoginTask | { status: string }>('/admin/login/check'),
 }

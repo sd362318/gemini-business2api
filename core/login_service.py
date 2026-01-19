@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from core.account import load_accounts_from_source
-from core.base_task_service import BaseTask, BaseTaskService, TaskStatus
+from core.base_task_service import BaseTask, BaseTaskService, TaskCancelledError, TaskStatus
 from core.config import config
 from core.duckmail_client import DuckMailClient
 from core.gemini_automation import GeminiAutomation
@@ -58,29 +58,45 @@ class LoginService(BaseTaskService[LoginTask]):
         self._is_polling = False
 
     async def start_login(self, account_ids: List[str]) -> LoginTask:
-        """启动登录任务"""
+        """启动登录任务（支持排队）。"""
         async with self._lock:
-            if self._current_task_id:
-                current = self._tasks.get(self._current_task_id)
-                if current and current.status == TaskStatus.RUNNING:
-                    raise ValueError("login task already running")
+            # 去重：同一批账号的 pending/running 任务直接复用
+            normalized = list(account_ids or [])
+            for existing in self._tasks.values():
+                if (
+                    isinstance(existing, LoginTask)
+                    and existing.account_ids == normalized
+                    and existing.status in (TaskStatus.PENDING, TaskStatus.RUNNING)
+                ):
+                    return existing
 
-            task = LoginTask(id=str(uuid.uuid4()), account_ids=account_ids)
+            task = LoginTask(id=str(uuid.uuid4()), account_ids=normalized)
             self._tasks[task.id] = task
-            self._current_task_id = task.id
-            self._append_log(task, "info", f"login task created ({len(account_ids)} accounts)")
-            asyncio.create_task(self._run_login_async(task))
+            self._append_log(task, "info", f"login task queued ({len(task.account_ids)} accounts)")
+            await self._enqueue_task(task)
             return task
 
+    def _execute_task(self, task: LoginTask):
+        return self._run_login_async(task)
+
     async def _run_login_async(self, task: LoginTask) -> None:
-        """异步执行登录任务"""
-        task.status = TaskStatus.RUNNING
+        """异步执行登录任务（支持取消）。"""
         loop = asyncio.get_running_loop()
         self._append_log(task, "info", "login task started")
 
         for account_id in task.account_ids:
+            if task.cancel_requested:
+                self._append_log(task, "warning", f"login task cancelled: {task.cancel_reason or 'cancelled'}")
+                task.status = TaskStatus.CANCELLED
+                task.finished_at = time.time()
+                return
             try:
                 result = await loop.run_in_executor(self._executor, self._refresh_one, account_id, task)
+            except TaskCancelledError:
+                # 线程侧已触发取消，直接结束任务
+                task.status = TaskStatus.CANCELLED
+                task.finished_at = time.time()
+                return
             except Exception as exc:
                 result = {"success": False, "email": account_id, "error": str(exc)}
             task.progress += 1
@@ -93,9 +109,11 @@ class LoginService(BaseTaskService[LoginTask]):
                 task.fail_count += 1
                 self._append_log(task, "error", f"refresh failed: {account_id} - {result.get('error')}")
 
-        task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
+        if task.cancel_requested:
+            task.status = TaskStatus.CANCELLED
+        else:
+            task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
         task.finished_at = time.time()
-        self._current_task_id = None
         self._append_log(task, "info", f"login task finished ({task.success_count}/{len(task.account_ids)})")
 
     def _refresh_one(self, account_id: str, task: LoginTask) -> dict:
@@ -122,7 +140,8 @@ class LoginService(BaseTaskService[LoginTask]):
         mail_refresh_token = account.get("mail_refresh_token")
         mail_tenant = account.get("mail_tenant") or "consumers"
 
-        log_cb = lambda level, message: self._append_log(task, level, f"[{account_id}] {message}")
+        def log_cb(level, message):
+            self._append_log(task, level, f"[{account_id}] {message}")
 
         # 创建邮件客户端
         if mail_provider == "microsoft":
@@ -181,6 +200,8 @@ class LoginService(BaseTaskService[LoginTask]):
                 headless=headless,
                 log_callback=log_cb,
             )
+        # 允许外部取消时立刻关闭浏览器
+        self._add_cancel_hook(task.id, lambda: getattr(automation, "stop", lambda: None)())
         try:
             result = automation.login_and_extract(account_id, client)
         except Exception as exc:
@@ -247,19 +268,20 @@ class LoginService(BaseTaskService[LoginTask]):
 
         return expiring
 
-    async def check_and_refresh(self) -> None:
+    async def check_and_refresh(self) -> Optional[LoginTask]:
         if os.environ.get("ACCOUNTS_CONFIG"):
             logger.info("[LOGIN] ACCOUNTS_CONFIG set, skipping refresh")
-            return
+            return None
         expiring_accounts = self._get_expiring_accounts()
         if not expiring_accounts:
             logger.debug("[LOGIN] no accounts need refresh")
-            return
+            return None
 
         try:
-            await self.start_login(expiring_accounts)
-        except ValueError as exc:
-            logger.warning("[LOGIN] %s", exc)
+            return await self.start_login(expiring_accounts)
+        except Exception as exc:
+            logger.warning("[LOGIN] refresh enqueue failed: %s", exc)
+            return None
 
     async def start_polling(self) -> None:
         if self._is_polling:

@@ -14,6 +14,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from core.base_task_service import TaskCancelledError
 
 
 # 常量
@@ -41,11 +42,20 @@ class GeminiAutomationUC:
         self.driver = None
         self.user_data_dir = None
 
+    def stop(self) -> None:
+        """外部请求停止：尽力关闭浏览器实例。"""
+        try:
+            self._cleanup()
+        except Exception:
+            pass
+
     def login_and_extract(self, email: str, mail_client) -> dict:
         """执行登录并提取配置"""
         try:
             self._create_driver()
             return self._run_flow(email, mail_client)
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             self._log("error", f"automation error: {exc}")
             return {"success": False, "error": str(exc)}
@@ -469,6 +479,8 @@ class GeminiAutomationUC:
         if self.log_callback:
             try:
                 self.log_callback(level, message)
+            except TaskCancelledError:
+                raise
             except Exception:
                 pass
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from core.account import load_accounts_from_source
-from core.base_task_service import BaseTask, BaseTaskService, TaskStatus
+from core.base_task_service import BaseTask, BaseTaskService, TaskCancelledError, TaskStatus
 from core.config import config
 from core.duckmail_client import DuckMailClient
 from core.gemini_automation import GeminiAutomation
@@ -20,11 +20,13 @@ logger = logging.getLogger("gemini.register")
 class RegisterTask(BaseTask):
     """注册任务数据类"""
     count: int = 0
+    domain: Optional[str] = None
 
     def to_dict(self) -> dict:
         """转换为字典"""
         base_dict = super().to_dict()
         base_dict["count"] = self.count
+        base_dict["domain"] = self.domain
         return base_dict
 
 
@@ -55,14 +57,10 @@ class RegisterService(BaseTaskService[RegisterTask]):
         )
 
     async def start_register(self, count: Optional[int] = None, domain: Optional[str] = None) -> RegisterTask:
-        """启动注册任务"""
+        """启动注册任务（支持排队）。"""
         async with self._lock:
             if os.environ.get("ACCOUNTS_CONFIG"):
                 raise ValueError("ACCOUNTS_CONFIG is set; register is disabled")
-            if self._current_task_id:
-                current = self._tasks.get(self._current_task_id)
-                if current and current.status == TaskStatus.RUNNING:
-                    raise ValueError("register task already running")
 
             domain_value = (domain or "").strip()
             if not domain_value:
@@ -70,22 +68,33 @@ class RegisterService(BaseTaskService[RegisterTask]):
 
             register_count = count or config.basic.register_default_count
             register_count = max(1, min(30, int(register_count)))
-            task = RegisterTask(id=str(uuid.uuid4()), count=register_count)
+            task = RegisterTask(id=str(uuid.uuid4()), count=register_count, domain=domain_value)
             self._tasks[task.id] = task
-            self._current_task_id = task.id
-            self._append_log(task, "info", f"register task created (count={register_count})")
-            asyncio.create_task(self._run_register_async(task, domain_value))
+            # 将 domain 记录在日志里，便于排查
+            self._append_log(task, "info", f"register task queued (count={register_count}, domain={domain_value or 'default'})")
+            await self._enqueue_task(task)
             return task
 
+    def _execute_task(self, task: RegisterTask):
+        return self._run_register_async(task, task.domain)
+
     async def _run_register_async(self, task: RegisterTask, domain: Optional[str]) -> None:
-        """异步执行注册任务"""
-        task.status = TaskStatus.RUNNING
+        """异步执行注册任务（支持取消）。"""
         loop = asyncio.get_running_loop()
         self._append_log(task, "info", "register task started")
 
         for _ in range(task.count):
+            if task.cancel_requested:
+                self._append_log(task, "warning", f"register task cancelled: {task.cancel_reason or 'cancelled'}")
+                task.status = TaskStatus.CANCELLED
+                task.finished_at = time.time()
+                return
             try:
                 result = await loop.run_in_executor(self._executor, self._register_one, domain, task)
+            except TaskCancelledError:
+                task.status = TaskStatus.CANCELLED
+                task.finished_at = time.time()
+                return
             except Exception as exc:
                 result = {"success": False, "error": str(exc)}
             task.progress += 1
@@ -98,14 +107,17 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 task.fail_count += 1
                 self._append_log(task, "error", f"register failed: {result.get('error')}")
 
-        task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
+        if task.cancel_requested:
+            task.status = TaskStatus.CANCELLED
+        else:
+            task.status = TaskStatus.SUCCESS if task.fail_count == 0 else TaskStatus.FAILED
         task.finished_at = time.time()
-        self._current_task_id = None
         self._append_log(task, "info", f"register task finished ({task.success_count}/{task.count})")
 
     def _register_one(self, domain: Optional[str], task: RegisterTask) -> dict:
         """注册单个账户"""
-        log_cb = lambda level, message: self._append_log(task, level, message)
+        def log_cb(level, message):
+            self._append_log(task, level, message)
         client = DuckMailClient(
             base_url=config.basic.duckmail_base_url,
             proxy=config.basic.proxy,
@@ -145,6 +157,8 @@ class RegisterService(BaseTaskService[RegisterTask]):
                 headless=headless,
                 log_callback=log_cb,
             )
+        # 允许外部取消时立刻关闭浏览器
+        self._add_cancel_hook(task.id, lambda: getattr(automation, "stop", lambda: None)())
 
         try:
             result = automation.login_and_extract(client.email, client)

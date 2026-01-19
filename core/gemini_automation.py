@@ -10,6 +10,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from DrissionPage import ChromiumPage, ChromiumOptions
+from core.base_task_service import TaskCancelledError
 
 
 # 常量
@@ -49,6 +50,17 @@ class GeminiAutomation:
         self.headless = headless
         self.timeout = timeout
         self.log_callback = log_callback
+        self._page = None
+        self._user_data_dir = None
+
+    def stop(self) -> None:
+        """外部请求停止：尽力关闭浏览器实例。"""
+        page = self._page
+        if page:
+            try:
+                page.quit()
+            except Exception:
+                pass
 
     def login_and_extract(self, email: str, mail_client) -> dict:
         """执行登录并提取配置"""
@@ -57,7 +69,11 @@ class GeminiAutomation:
         try:
             page = self._create_page()
             user_data_dir = getattr(page, 'user_data_dir', None)
+            self._page = page
+            self._user_data_dir = user_data_dir
             return self._run_flow(page, email, mail_client)
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             self._log("error", f"automation error: {exc}")
             return {"success": False, "error": str(exc)}
@@ -67,7 +83,9 @@ class GeminiAutomation:
                     page.quit()
                 except Exception:
                     pass
+            self._page = None
             self._cleanup_user_data(user_data_dir)
+            self._user_data_dir = None
 
     def _create_page(self) -> ChromiumPage:
         """创建浏览器页面"""
@@ -527,6 +545,8 @@ class GeminiAutomation:
         if self.log_callback:
             try:
                 self.log_callback(level, message)
+            except TaskCancelledError:
+                raise
             except Exception:
                 pass
 

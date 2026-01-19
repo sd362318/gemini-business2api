@@ -20,7 +20,7 @@ export interface AccountsListResponse {
 }
 
 export interface AccountConfigItem {
-  id?: string
+  id: string
   secure_c_ses: string
   csesidx: string
   config_id: string
@@ -204,11 +204,12 @@ export interface LoginResponse {
   message?: string
 }
 
-export type AutomationStatus = 'pending' | 'running' | 'success' | 'failed'
+export type AutomationStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled'
 
 export interface RegisterTask {
   id: string
   count: number
+  domain?: string | null
   status: AutomationStatus
   progress: number
   success_count: number
@@ -218,6 +219,8 @@ export interface RegisterTask {
   results: Array<Record<string, any>>
   error?: string | null
   logs?: Array<{ time: string; level: string; message: string }>
+  cancel_requested?: boolean
+  cancel_reason?: string | null
 }
 
 export interface LoginTask {
@@ -232,4 +235,6 @@ export interface LoginTask {
   results: Array<Record<string, any>>
   error?: string | null
   logs?: Array<{ time: string; level: string; message: string }>
+  cancel_requested?: boolean
+  cancel_reason?: string | null
 }

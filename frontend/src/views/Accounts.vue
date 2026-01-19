@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="space-y-8">
     <section class="rounded-3xl border border-border bg-card p-6">
       <div class="flex flex-wrap items-center justify-between gap-4">
@@ -535,13 +535,22 @@
 
           <div v-if="registerTask || loginTask" class="grid gap-3 text-xs text-muted-foreground">
             <div v-if="registerTask" class="space-y-1">
-              <div class="flex items-center gap-2 font-medium text-foreground">
-                <span
-                  class="h-2.5 w-2.5 rounded-full"
-                  :class="getTaskStatusIndicatorClass(registerTask)"
-                  aria-hidden="true"
-                ></span>
-                注册任务
+              <div class="flex items-center justify-between gap-3 font-medium text-foreground">
+                <div class="flex items-center gap-2">
+                  <span
+                    class="h-2.5 w-2.5 rounded-full"
+                    :class="getTaskStatusIndicatorClass(registerTask)"
+                    aria-hidden="true"
+                  ></span>
+                  注册任务
+                </div>
+                <button
+                  v-if="registerTask.status === 'running' || registerTask.status === 'pending'"
+                  class="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-rose-500 hover:text-rose-600"
+                  @click="cancelRegister(registerTask.id)"
+                >
+                  中断
+                </button>
               </div>
               <div class="flex flex-wrap gap-x-4 gap-y-1">
                 <span>状态：{{ formatTaskStatus(registerTask.status) }}</span>
@@ -551,13 +560,22 @@
               </div>
             </div>
             <div v-if="loginTask" class="space-y-1">
-              <div class="flex items-center gap-2 font-medium text-foreground">
-                <span
-                  class="h-2.5 w-2.5 rounded-full"
-                  :class="getTaskStatusIndicatorClass(loginTask)"
-                  aria-hidden="true"
-                ></span>
-                刷新任务
+              <div class="flex items-center justify-between gap-3 font-medium text-foreground">
+                <div class="flex items-center gap-2">
+                  <span
+                    class="h-2.5 w-2.5 rounded-full"
+                    :class="getTaskStatusIndicatorClass(loginTask)"
+                    aria-hidden="true"
+                  ></span>
+                  刷新任务
+                </div>
+                <button
+                  v-if="loginTask.status === 'running' || loginTask.status === 'pending'"
+                  class="rounded-full border border-border px-3 py-1 text-xs text-muted-foreground transition-colors hover:border-rose-500 hover:text-rose-600"
+                  @click="cancelLogin(loginTask.id)"
+                >
+                  中断
+                </button>
               </div>
               <div class="flex flex-wrap gap-x-4 gap-y-1">
                 <span>状态：{{ formatTaskStatus(loginTask.status) }}</span>
@@ -784,8 +802,6 @@ const showMoreActions = ref(false)
 const moreActionsRef = ref<HTMLDivElement | null>(null)
 const lastRegisterTaskId = ref<string | null>(null)
 const lastLoginTaskId = ref<string | null>(null)
-const clearedRegisterTaskId = ref<string | null>(null)
-const clearedLoginTaskId = ref<string | null>(null)
 const registerLogClearOffset = ref(0)
 const loginLogClearOffset = ref(0)
 const registerAgreed = ref(false)
@@ -799,8 +815,6 @@ const REGISTER_TASK_CACHE_KEY = 'accounts-register-task-cache'
 const LOGIN_TASK_CACHE_KEY = 'accounts-login-task-cache'
 const REGISTER_CLEAR_KEY = 'accounts-register-log-clear'
 const LOGIN_CLEAR_KEY = 'accounts-login-log-clear'
-const REGISTER_CLEARED_TASK_KEY = 'accounts-register-task-cleared-id'
-const LOGIN_CLEARED_TASK_KEY = 'accounts-login-task-cleared-id'
 const editForm = ref<AccountConfigItem>({
   id: '',
   secure_c_ses: '',
@@ -850,37 +864,9 @@ const readCachedTask = <T,>(key: string): T | null => {
   }
 }
 
-const readClearedTaskId = (key: string) => {
-  try {
-    return localStorage.getItem(key) || null
-  } catch {
-    return null
-  }
-}
-
-const writeClearedTaskId = (key: string, value: string | null) => {
-  try {
-    if (value) {
-      localStorage.setItem(key, value)
-      return
-    }
-    localStorage.removeItem(key)
-  } catch {
-    // ignore storage errors
-  }
-}
-
 const writeCachedTask = (key: string, value: unknown) => {
   try {
     localStorage.setItem(key, JSON.stringify(value))
-  } catch {
-    // ignore storage errors
-  }
-}
-
-const clearCachedTask = (key: string) => {
-  try {
-    localStorage.removeItem(key)
   } catch {
     // ignore storage errors
   }
@@ -902,11 +888,6 @@ const writeClearOffset = (key: string, value: number) => {
 
 const syncRegisterTask = (task: RegisterTask | null, persist = true) => {
   if (!task) return
-  if (task.id && task.id === clearedRegisterTaskId.value) return
-  if (task.id && clearedRegisterTaskId.value && task.id !== clearedRegisterTaskId.value) {
-    clearedRegisterTaskId.value = null
-    writeClearedTaskId(REGISTER_CLEARED_TASK_KEY, null)
-  }
   registerTask.value = task
   if (task.id && task.id !== lastRegisterTaskId.value) {
     lastRegisterTaskId.value = task.id
@@ -920,11 +901,6 @@ const syncRegisterTask = (task: RegisterTask | null, persist = true) => {
 
 const syncLoginTask = (task: LoginTask | null, persist = true) => {
   if (!task) return
-  if (task.id && task.id === clearedLoginTaskId.value) return
-  if (task.id && clearedLoginTaskId.value && task.id !== clearedLoginTaskId.value) {
-    clearedLoginTaskId.value = null
-    writeClearedTaskId(LOGIN_CLEARED_TASK_KEY, null)
-  }
   loginTask.value = task
   if (task.id && task.id !== lastLoginTaskId.value) {
     lastLoginTaskId.value = task.id
@@ -939,15 +915,13 @@ const syncLoginTask = (task: LoginTask | null, persist = true) => {
 const hydrateTaskCache = () => {
   registerLogClearOffset.value = readClearOffset(REGISTER_CLEAR_KEY)
   loginLogClearOffset.value = readClearOffset(LOGIN_CLEAR_KEY)
-  clearedRegisterTaskId.value = readClearedTaskId(REGISTER_CLEARED_TASK_KEY)
-  clearedLoginTaskId.value = readClearedTaskId(LOGIN_CLEARED_TASK_KEY)
   const cachedRegister = readCachedTask<RegisterTask>(REGISTER_TASK_CACHE_KEY)
-  if (cachedRegister && cachedRegister.id !== clearedRegisterTaskId.value) {
+  if (cachedRegister) {
     registerTask.value = cachedRegister
     lastRegisterTaskId.value = cachedRegister.id || null
   }
   const cachedLogin = readCachedTask<LoginTask>(LOGIN_TASK_CACHE_KEY)
-  if (cachedLogin && cachedLogin.id !== clearedLoginTaskId.value) {
+  if (cachedLogin) {
     loginTask.value = cachedLogin
     lastLoginTaskId.value = cachedLogin.id || null
   }
@@ -1111,10 +1085,10 @@ const refreshTaskSnapshot = async () => {
     const registerId = registerTask.value?.id
     const loginId = loginTask.value?.id
 
-    if (registerId && !isClearedRegisterTaskId(registerId)) {
+    if (registerId) {
       tasks.push(updateRegisterTask(registerId))
     }
-    if (loginId && !isClearedLoginTaskId(loginId)) {
+    if (loginId) {
       tasks.push(updateLoginTask(loginId))
     }
 
@@ -1139,34 +1113,33 @@ const closeTaskModal = () => {
 }
 
 const clearTaskLogs = () => {
-  const registerId = registerTask.value?.id || null
-  const loginId = loginTask.value?.id || null
-  clearedRegisterTaskId.value = registerId
-  clearedLoginTaskId.value = loginId
-  writeClearedTaskId(REGISTER_CLEARED_TASK_KEY, registerId)
-  writeClearedTaskId(LOGIN_CLEARED_TASK_KEY, loginId)
+  // 仅“清空显示日志”：通过 offset 让新日志继续实时显示
   registerLogClearOffset.value = registerTask.value?.logs?.length || 0
   loginLogClearOffset.value = loginTask.value?.logs?.length || 0
   writeClearOffset(REGISTER_CLEAR_KEY, registerLogClearOffset.value)
   writeClearOffset(LOGIN_CLEAR_KEY, loginLogClearOffset.value)
-  registerTask.value = null
-  loginTask.value = null
-  lastRegisterTaskId.value = null
-  lastLoginTaskId.value = null
   automationError.value = ''
-  isRegistering.value = false
-  isRefreshing.value = false
-  clearRegisterTimer()
-  clearLoginTimer()
-  clearCachedTask(REGISTER_TASK_CACHE_KEY)
-  clearCachedTask(LOGIN_TASK_CACHE_KEY)
 }
 
-const isClearedRegisterTaskId = (taskId?: string | null) =>
-  Boolean(taskId && taskId === clearedRegisterTaskId.value)
+const cancelRegister = async (taskId: string) => {
+  try {
+    await accountsApi.cancelRegisterTask(taskId, 'cancelled_by_user')
+    await refreshTaskSnapshot()
+    toast.success('已请求中断注册任务')
+  } catch (error: any) {
+    toast.error(error?.message || '中断注册任务失败')
+  }
+}
 
-const isClearedLoginTaskId = (taskId?: string | null) =>
-  Boolean(taskId && taskId === clearedLoginTaskId.value)
+const cancelLogin = async (taskId: string) => {
+  try {
+    await accountsApi.cancelLoginTask(taskId, 'cancelled_by_user')
+    await refreshTaskSnapshot()
+    toast.success('已请求中断刷新任务')
+  } catch (error: any) {
+    toast.error(error?.message || '中断刷新任务失败')
+  }
+}
 
 const toggleMoreActions = () => {
   showMoreActions.value = !showMoreActions.value
@@ -1643,6 +1616,7 @@ const formatTaskStatus = (status: string) => {
   if (status === 'running') return '执行中'
   if (status === 'success') return '成功'
   if (status === 'failed') return '失败'
+  if (status === 'cancelled') return '已中断'
   return status
 }
 
@@ -1677,15 +1651,7 @@ const getTaskStatusIndicatorClass = (task: RegisterTask | LoginTask) => {
 }
 
 const updateRegisterTask = async (taskId: string) => {
-  if (isClearedRegisterTaskId(taskId)) {
-    clearRegisterTimer()
-    return
-  }
   const task = await accountsApi.getRegisterTask(taskId)
-  if (isClearedRegisterTaskId(task.id)) {
-    clearRegisterTimer()
-    return
-  }
   syncRegisterTask(task)
   if (task.status !== 'running' && task.status !== 'pending') {
     isRegistering.value = false
@@ -1708,15 +1674,7 @@ const updateRegisterTask = async (taskId: string) => {
 }
 
 const updateLoginTask = async (taskId: string) => {
-  if (isClearedLoginTaskId(taskId)) {
-    clearLoginTimer()
-    return
-  }
   const task = await accountsApi.getLoginTask(taskId)
-  if (isClearedLoginTaskId(task.id)) {
-    clearLoginTimer()
-    return
-  }
   syncLoginTask(task)
   if (task.status !== 'running' && task.status !== 'pending') {
     isRefreshing.value = false
@@ -1781,7 +1739,7 @@ const startBackgroundTaskPolling = () => {
 const loadCurrentTasks = async () => {
   try {
     const registerCurrent = await accountsApi.getRegisterCurrent()
-    if (registerCurrent && 'id' in registerCurrent && !isClearedRegisterTaskId(registerCurrent.id)) {
+    if (registerCurrent && 'id' in registerCurrent) {
       syncRegisterTask(registerCurrent)
       if (registerCurrent.status === 'running' || registerCurrent.status === 'pending') {
         isRegistering.value = true
@@ -1794,7 +1752,7 @@ const loadCurrentTasks = async () => {
 
   try {
     const loginCurrent = await accountsApi.getLoginCurrent()
-    if (loginCurrent && 'id' in loginCurrent && !isClearedLoginTaskId(loginCurrent.id)) {
+    if (loginCurrent && 'id' in loginCurrent) {
       syncLoginTask(loginCurrent)
       if (loginCurrent.status === 'running' || loginCurrent.status === 'pending') {
         isRefreshing.value = true
@@ -1844,12 +1802,19 @@ const handleRefreshExpiring = async () => {
   automationError.value = ''
   isRefreshing.value = true
   try {
-    await accountsApi.checkLogin()
+    const taskOrIdle = await accountsApi.checkLogin()
+    if (taskOrIdle && 'id' in taskOrIdle) {
+      syncLoginTask(taskOrIdle)
+      startLoginPolling(taskOrIdle.id)
+      // 自动打开任务状态弹窗
+      openTaskModal()
+      return
+    }
+    // 没有新任务时，尝试读取当前任务（可能已有 running/pending）
     const current = await accountsApi.getLoginCurrent()
     if (current && 'id' in current) {
       syncLoginTask(current)
       startLoginPolling(current.id)
-      // 自动打开任务状态弹窗
       openTaskModal()
       return
     }
